@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Log in – {{TITLE}}</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1c2027" media="(prefers-color-scheme: dark)">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main id="login">
+    <form class="login-card" method="post" action="/login">
+      <h1 class="brand"><img class="logo" src="/icons/icon.svg" alt="" width="40" height="40">{{TITLE}}</h1>
+      <p class="muted">Log in to continue.</p>
+      <p class="error" hidden>Wrong username or password.</p>
+      <label for="username">Username</label>
+      <input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button type="submit" class="button primary big">Log in</button>
+    </form>
+  </main>
+</body>
+</html>

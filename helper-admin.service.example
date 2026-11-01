@@ -1,0 +1,26 @@
+# systemd user unit for the helper app. Copy it, set the folder, then enable it:
+#   cp helper-admin.service.example ~/.config/systemd/user/helper-admin.service
+#   nano ~/.config/systemd/user/helper-admin.service      # WorkingDirectory = where you cloned the repo
+#   systemctl --user daemon-reload && systemctl --user enable --now helper-admin
+#   sudo loginctl enable-linger "$USER"                    # keep it running without a login
+[Unit]
+Description=Chat helper admin (starts and supervises every helper)
+After=network-online.target
+
+[Service]
+# %h is your home folder
+WorkingDirectory=%h/helper-app
+ExecStart=/usr/bin/python3 manager.py
+Restart=on-failure
+RestartSec=5
+# Optional settings (defaults shown); see README.md
+#Environment=CONV_HELPER_ADMIN_PORT=8010
+#Environment=CONV_HELPER_HOST=0.0.0.0
+#Environment=CONV_HELPER_DATA=%h/helper-app/data
+#Environment=CONV_HELPER_CREDENTIAL=%h/.config/conv-helper/credential
+#Environment=CONV_HELPER_CLAUDE=%h/.local/bin/claude
+#Environment=CONV_HELPER_MODEL=opus
+#Environment=CONV_HELPER_PDF_PYTHON=%h/.venvs/pdf2md/bin/python
+
+[Install]
+WantedBy=default.target

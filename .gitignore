@@ -1,0 +1,26 @@
+# your data: helpers, documents, chats, users, logins (never in git)
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# secrets and local config
+.env
+*.env
+!.env.example
+credential
+*token*.txt
+helper-admin.service
+
+# Claude Code / editors / Python
+.claude/
+CLAUDE.md
+__pycache__/
+*.pyc
+venv/
+.venv/
+.vscode/
+.idea/
+*.swp
+*.tmp
+.DS_Store

@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Helper admin</title>
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1c2027" media="(prefers-color-scheme: dark)">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/admin.js" defer></script>
+</head>
+<body class="admin">
+  <header class="admin-head">
+    <a class="brand" href="#/"><img class="logo" src="/icons/icon.svg" alt="" width="30" height="30">Helper admin</a>
+    <form method="post" action="/logout"><button type="submit" class="button ghost">Log out</button></form>
+  </header>
+
+  <main id="view"></main>
+
+  <template id="list-tpl">
+    <div class="admin-top">
+      <h1>Helpers</h1>
+      <a class="button primary" href="#/new">+ New helper</a>
+    </div>
+    <p class="muted empty" hidden>No helpers yet. Create one to get started.</p>
+    <div class="cards"></div>
+  </template>
+
+  <template id="edit-tpl">
+    <p><a href="#/" class="back">← All helpers</a></p>
+    <div class="admin-top">
+      <h1 class="edit-title"></h1>
+      <div class="controls" hidden>
+        <span class="status"></span>
+        <a class="button open" target="_blank" rel="noopener">Open ↗</a>
+        <button type="button" class="button start">Start</button>
+        <button type="button" class="button restart">Restart</button>
+        <button type="button" class="button stop">Stop</button>
+      </div>
+    </div>
+
+    <nav class="tabs" role="tablist" aria-label="Helper sections" hidden>
+      <a class="tab" role="tab" data-tab="settings">Settings</a>
+      <a class="tab" role="tab" data-tab="files">Files <span class="count files-count"></span></a>
+      <a class="tab" role="tab" data-tab="users">Users <span class="count users-count"></span></a>
+      <a class="tab" role="tab" data-tab="log">Log</a>
+    </nav>
+
+    <form class="panel helper-form" data-tab="settings">
+      <label for="f-name">Name</label>
+      <input id="f-name" name="name" maxlength="60" required placeholder="For example: Firewall runbook helper">
+      <p class="hint">Shown in the helper's title bar, login page and app icon label.</p>
+
+      <label for="f-purpose">Purpose</label>
+      <textarea id="f-purpose" name="purpose" rows="7" required
+        placeholder="What the helper is for and how it should answer. For example: Answers questions about our OPNsense firewall setup from the runbook files. Give exact menu paths and commands. Keep answers short."></textarea>
+      <p class="hint">Claude gets this as its instructions, and it's shown on the helper's new-chat screen.
+        Changes apply to the next question; no restart needed.</p>
+
+      <label for="f-port">Port</label>
+      <input id="f-port" name="port" type="number" min="1024" max="65535" required>
+      <p class="hint">The helper's own web address is <code class="url-preview"></code>. Changing it restarts the helper.</p>
+
+      <p class="error form-error" hidden></p>
+      <div class="form-actions">
+        <button type="submit" class="button primary save">Save</button>
+        <span class="saved muted" hidden>Saved.</span>
+      </div>
+    </form>
+
+    <section class="panel files-panel" data-tab="files" hidden>
+      <div class="admin-top small">
+        <h2>Files</h2>
+        <label class="button primary upload">Upload files<input type="file" multiple accept=".md,.markdown,.txt,.pdf,.docx,text/markdown,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden></label>
+      </div>
+      <p class="hint">What the helper answers from. Claude searches these and reads only the parts it needs.
+        <code>.md</code>, <code>.markdown</code> or <code>.txt</code> (up to 20 MB), or <code>.pdf</code> and <code>.docx</code>
+        (up to 50 MB), which are converted to Markdown automatically; the original is kept and can be downloaded.
+        A file with the same name is replaced. Changes apply to the next question.</p>
+      <div class="drop">Drop files here</div>
+      <ul class="upload-status"></ul>
+      <table class="files">
+        <thead><tr><th>File</th><th>Size</th><th>Changed</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="muted no-files" hidden>No files yet.</p>
+    </section>
+
+    <section class="panel users-panel" data-tab="users" hidden>
+      <h2>Users</h2>
+      <p class="hint">People who can log in to this helper (and only this one). Each user sees only their own chats.
+        Your admin login (<code class="admin-name"></code>) also works here. Removing a user or setting a new password
+        logs them out at once; a removed user's chats are kept.</p>
+      <table class="users">
+        <thead><tr><th>Username</th><th>Added</th><th>Password set</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="muted no-users" hidden>No users yet: only the admin login works on this helper.</p>
+      <form class="add-user">
+        <input name="username" placeholder="Username" autocomplete="off" autocapitalize="none" spellcheck="false" required maxlength="40">
+        <input name="password" type="password" placeholder="Password (8+ characters)" autocomplete="new-password" required minlength="8">
+        <button type="submit" class="button primary">Add user</button>
+      </form>
+      <p class="error user-error" hidden></p>
+    </section>
+
+    <section class="panel log-panel" data-tab="log" hidden>
+      <h2>Process log</h2>
+      <p class="hint">What the helper's process printed: starts, stops, crashes and errors. Updates by itself.</p>
+      <pre class="log"></pre>
+    </section>
+
+    <section class="panel danger-zone" data-tab="settings" hidden>
+      <h2>Delete helper</h2>
+      <p class="hint">Stops the helper and moves its folder (files, chats) to <code>data/trash/</code> on the server.</p>
+      <button type="button" class="button danger delete">Delete helper</button>
+    </section>
+  </template>
+</body>
+</html>

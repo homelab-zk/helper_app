@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+  <title>{{TITLE}}</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1c2027" media="(prefers-color-scheme: dark)">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/vendor/marked.min.js" defer></script>
+  <script src="/vendor/purify.min.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body class="app">
+  <header class="topbar">
+    <button type="button" id="menu" class="icon-btn" aria-label="Show or hide chats" aria-controls="sidebar" aria-expanded="true">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    </button>
+    <a class="brand new-chat" href="#/new" title="New chat"><img class="logo" src="/icons/icon.svg" alt="" width="28" height="28"><span id="brand-name">{{TITLE}}</span></a>
+    <span class="crumb-sep" aria-hidden="true">›</span>
+    <h1 id="chat-title"></h1>
+    <div class="topbar-actions">
+      <a class="button primary new-chat" href="#/new" aria-label="New chat">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+        <span class="label">New chat</span>
+      </a>
+      <div class="user-menu">
+        <button type="button" id="user-btn" class="user-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="user-pop">
+          <span class="avatar" id="avatar">?</span><span class="who-name" id="who"></span>
+          <svg class="caret" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <div id="user-pop" class="menu-pop" role="menu" hidden>
+          <p class="menu-who">Signed in as <strong id="who-full"></strong></p>
+          <button type="button" id="install" class="menu-item" role="menuitem" hidden>Install app</button>
+          <form method="post" action="/logout"><button type="submit" class="menu-item" role="menuitem">Log out</button></form>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside id="sidebar">
+      <input type="search" id="chat-search" placeholder="Search chats" aria-label="Search chats" autocomplete="off">
+      <h2>Chats</h2>
+      <p id="no-chats" class="muted" hidden>No chats yet.</p>
+      <ul id="chat-list"></ul>
+    </aside>
+    <div id="backdrop"></div>
+
+    <section id="chat">
+    <main id="messages" aria-live="polite"></main>
+    <form id="ask-form">
+      <div class="ask-row">
+        <textarea id="question" rows="1" placeholder="Ask a question…" aria-label="Question"></textarea>
+        <button type="submit" id="send" class="button primary">Send</button>
+        <button type="button" id="stop" class="button danger" hidden>Stop</button>
+      </div>
+      <div class="ask-options">
+        <label>Model <select id="model"></select></label>
+        <label>Effort <select id="effort"></select></label>
+        <label class="web-toggle" title="Also search the internet for this question"><input type="checkbox" id="web"> Web search</label>
+      </div>
+    </form>
+    </section>
+  </div>
+</body>
+</html>

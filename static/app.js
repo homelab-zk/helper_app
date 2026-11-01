@@ -1,0 +1,397 @@
+// Helper front-end: chat list in a sidebar and a streaming chat view.
+const $ = (sel) => document.querySelector(sel);
+const state = { chatId: null, runningChat: null, liveEl: null, defaultModel: "opus", name: "Helper", purpose: "", files: [],
+  chats: [] };  // one answer at a time
+
+const EFFORT_LABELS = { "": "Default", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" };
+const PREFS_KEY = "helper-prefs";  // last model/effort chosen, the default for new chats (each port is its own origin)
+const SIDE_KEY = "helper-side-hidden";  // wide screens: the reader hid the chat list
+const wide = () => matchMedia("(min-width: 761px)").matches;
+
+const md = (text) => DOMPurify.sanitize(marked.parse(text || ""));
+const esc = (s) => { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; };
+const fmtDate = (ts) => new Date(ts * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  checkLogin(res);
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+  return res.json();
+}
+
+// session expired or logged out elsewhere: back to the login page
+function checkLogin(res) {
+  if (res.status === 401) {
+    location.href = "/login";
+    throw new Error("Not logged in");
+  }
+}
+
+// ---------- model and effort ----------
+async function loadOptions() {
+  const opts = await api("/api/options");
+  $("#model").innerHTML = opts.models.map((m) => `<option value="${m.id}">${esc(m.label)}</option>`).join("");
+  $("#effort").innerHTML = ["", ...opts.efforts].map((e) => `<option value="${e}">${EFFORT_LABELS[e] || e}</option>`).join("");
+  state.defaultModel = opts.default_model;
+  state.name = opts.name;
+  state.purpose = opts.purpose;
+  state.files = opts.files;
+  $("#brand-name").textContent = opts.name;
+  const user = opts.user || "";
+  $("#who").textContent = user;
+  $("#who-full").textContent = user || "(login is off)";
+  $("#avatar").textContent = (user[0] || "?").toUpperCase();
+  $("#user-btn").title = user ? `Signed in as ${user}` : "Account";
+}
+
+function prefs() {
+  try { return JSON.parse(localStorage.getItem(PREFS_KEY)) || {}; } catch { return {}; }
+}
+
+function savePrefs() {
+  try { localStorage.setItem(PREFS_KEY, JSON.stringify({ model: $("#model").value, effort: $("#effort").value })); } catch {}
+}
+
+// a chat reopens with its last choice; new and older chats use the last one picked anywhere
+function applyChoice(model, effort) {
+  const p = prefs();
+  const pick = (sel, ...values) => {
+    const v = values.find((x) => x != null && [...sel.options].some((o) => o.value === x));
+    if (v != null) sel.value = v;
+  };
+  pick($("#model"), model, p.model, state.defaultModel);
+  pick($("#effort"), effort, p.effort, "");
+}
+
+// "claude-opus-5-5" -> "Opus 5.5"
+function modelLabel(id) {
+  const m = /^claude-([a-z]+)-(\d+)(?:-(\d+))?/.exec(id || "");
+  return m ? `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}${m[3] ? "." + m[3] : ""}` : id;
+}
+
+// ---------- routing: #/new (also #/)  #/chat/<id> ----------
+async function route() {
+  const m = location.hash.match(/^#\/chat\/(\d+)$/);
+  document.body.classList.remove("side-open");
+  closeUserMenu();
+  try {
+    await showChat(m ? Number(m[1]) : null);
+  } catch (e) {
+    alert(e.message);
+    location.hash = "#/new";
+  }
+  loadChats();
+}
+
+// ---------- sidebar: all chats, newest first, filtered by the search box ----------
+async function loadChats() {
+  try {
+    state.chats = await api("/api/chats");
+  } catch (e) {
+    return console.error(e);
+  }
+  renderChats();
+}
+
+function renderChats() {
+  const q = $("#chat-search").value.trim().toLowerCase();
+  const chats = q ? state.chats.filter((c) => c.title.toLowerCase().includes(q)) : state.chats;
+  const list = $("#chat-list");
+  list.innerHTML = "";
+  $("#no-chats").hidden = chats.length > 0;
+  $("#no-chats").textContent = q ? "No chats match." : "No chats yet.";
+  for (const c of chats) {
+    const li = document.createElement("li");
+    li.classList.toggle("active", c.id === state.chatId);
+    li.innerHTML = `<a href="#/chat/${c.id}"><span class="title">${esc(c.title)}</span>
+      <span class="meta">${c.running ? "answering…" : fmtDate(c.updated)}</span></a>
+      <button class="delete" title="Delete chat" aria-label="Delete chat">✕</button>`;
+    li.querySelector(".delete").onclick = async () => {
+      if (!confirm(`Delete “${c.title}”?`)) return;
+      await api(`/api/chats/${c.id}`, { method: "DELETE" });
+      if (c.id === state.chatId) location.hash = "#/new";  // route() reloads the list
+      else loadChats();
+    };
+    list.append(li);
+  }
+}
+
+async function showChat(id) {
+  state.chatId = id;
+  document.body.classList.toggle("in-chat", id !== null);
+  $("#web").checked = false;  // web search is opt-in, per chat visit
+  const box = $("#messages");
+  box.innerHTML = "";
+  if (id === null) {
+    $("#chat-title").textContent = "New chat";
+    document.title = `New chat – ${state.name}`;
+    const n = state.files.length;
+    box.innerHTML = `<div class="empty-chat"><h2>${esc(state.name)}</h2>
+      <p class="purpose">${esc(state.purpose)}</p>
+      <p class="source-note">${n ? `Answers come from this helper's ${n} document${n > 1 ? "s" : ""} by default.`
+        : "This helper has no documents yet, so answers come from general knowledge."}
+        Tick <strong>Web search</strong> below to also search the internet for a question.</p></div>`;
+    applyChoice();
+    setRunning(state.runningChat);
+    $("#question").focus();
+    return;
+  }
+  const chat = await api(`/api/chats/${id}`);
+  $("#chat-title").textContent = chat.title;
+  document.title = `${chat.title} – ${state.name}`;
+  applyChoice(chat.model, chat.effort);
+  for (const m of chat.messages) {
+    if (m.role === "user") addUser(m.content);
+    else box.append(answerEl(m.content, m.tools, 0, m.model, m.effort, m.web));
+  }
+  setRunning(state.runningChat);
+  if (chat.running && state.runningChat === id && state.liveEl) {
+    box.append(state.liveEl);  // answer still streaming in this window
+  } else if (chat.running) {
+    const note = document.createElement("p");
+    note.className = "note-box thinking";
+    note.textContent = "Still answering… this updates by itself.";
+    box.append(note);
+    setTimeout(() => { if (state.chatId === id) showChat(id).then(loadChats).catch(console.error); }, 3000);
+  }
+  scrollDown(true);
+  $("#question").focus();
+}
+
+// ---------- messages ----------
+function addUser(text) {
+  const el = document.createElement("div");
+  el.className = "msg user";
+  el.innerHTML = `<div class="bubble">${esc(text)}</div>`;
+  $("#messages").append(el);
+}
+
+function answerEl(content, tools = [], seconds = 0, model = null, effort = null, web = false) {
+  const el = document.createElement("div");
+  el.className = "msg assistant";
+  if (tools.length) {
+    el.innerHTML = `<details class="tools"><summary>Looked up ${tools.length} thing${tools.length > 1 ? "s" : ""}</summary>
+      <ul>${tools.map((t) => `<li>${esc(t)}</li>`).join("")}</ul></details>`;
+  }
+  const body = document.createElement("div");
+  body.className = "body";
+  body.innerHTML = md(content);
+  el.append(body);
+  const meta = [seconds && `Answered in ${seconds} s`, model && modelLabel(model), effort && `${EFFORT_LABELS[effort] || effort} effort`, web && "Web search"];
+  if (meta.some(Boolean)) el.insertAdjacentHTML("beforeend", `<div class="meta-line">${esc(meta.filter(Boolean).join(" · "))}</div>`);
+  return el;
+}
+
+function liveAnswer() {
+  const el = document.createElement("div");
+  el.className = "msg assistant";
+  el.innerHTML = `<ul class="activity"></ul><div class="body"><span class="thinking">Thinking…</span></div>`;
+  $("#messages").append(el);
+  state.liveEl = el;
+  const body = el.querySelector(".body");
+  const activity = el.querySelector(".activity");
+  let text = "";
+  let frame = 0;
+  const render = () => { frame = 0; body.innerHTML = md(text); scrollDown(); };
+  const note = (cls, t) => {
+    const li = document.createElement("li");
+    li.className = cls;
+    li.textContent = t;
+    activity.append(li);
+    scrollDown();
+  };
+  return {
+    finished: false,
+    text({ delta }) { text += delta; if (!frame) frame = requestAnimationFrame(render); },
+    turn() {
+      if (text.trim()) note("note", text.trim());
+      text = "";
+      body.innerHTML = `<span class="thinking">Thinking…</span>`;
+    },
+    tool({ text: t }) { note("", t); },
+    status({ text: t }) { note("note", t); },
+    done({ answer, tools, seconds, model, effort, web }) {
+      this.finished = true;
+      cancelAnimationFrame(frame);
+      el.replaceWith(answerEl(answer, tools, seconds, model, effort, web));
+      scrollDown();
+    },
+    error(message) {
+      this.finished = true;
+      cancelAnimationFrame(frame);
+      body.innerHTML = `<p class="error">${esc(message)}</p>`;
+    },
+  };
+}
+
+function scrollDown(force = false) {
+  const box = $("#messages");
+  if (force || box.scrollHeight - box.scrollTop - box.clientHeight < 120) box.scrollTop = box.scrollHeight;
+  if (force) requestAnimationFrame(() => { box.scrollTop = box.scrollHeight; });  // again after layout settles
+}
+
+// ---------- asking ----------
+async function readEvents(res, handle) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf("\n\n")) >= 0) {
+      const chunk = buf.slice(0, i);
+      buf = buf.slice(i + 2);
+      const event = /^event: (.*)$/m.exec(chunk)?.[1];
+      const data = /^data: (.*)$/m.exec(chunk)?.[1];
+      if (event) handle(event, data ? JSON.parse(data) : {});
+    }
+  }
+}
+
+async function send(question) {
+  question = question.trim();
+  if (state.runningChat !== null || !question) return;
+  let live;
+  try {
+    let id = state.chatId;
+    if (id === null) {
+      const chat = await api("/api/chats", { method: "POST", body: JSON.stringify({ title: question }) });
+      id = state.chatId = chat.id;
+      history.replaceState(null, "", `#/chat/${id}`);
+      $("#chat-title").textContent = chat.title;
+      $("#messages").innerHTML = "";
+      loadChats();
+    }
+    setRunning(id);
+    addUser(question);
+    $("#question").value = "";
+    autosize();
+    live = liveAnswer();
+    scrollDown(true);
+    const res = await fetch(`/api/chats/${id}/ask`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, model: $("#model").value, effort: $("#effort").value, web: $("#web").checked }),
+    });
+    checkLogin(res);
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    loadChats();  // shows "answering…"
+    await readEvents(res, (event, data) => live[event]?.(data));
+    if (!live.finished) live.error("The connection closed before the answer finished. Reopen the chat to see if it was saved.");
+  } catch (e) {
+    if (live) live.error(e.message); else alert(e.message);
+  } finally {
+    state.liveEl = null;
+    setRunning(null);
+    loadChats();
+  }
+}
+
+function setRunning(chatId) {
+  state.runningChat = chatId;
+  $("#send").hidden = chatId !== null;
+  $("#stop").hidden = chatId === null;
+}
+
+function autosize() {
+  const q = $("#question");
+  q.style.height = "auto";
+  q.style.height = `${q.scrollHeight + 2}px`;
+}
+
+// ---------- installing as an app (Android Chrome, desktop Chrome/Edge) ----------
+let installPrompt = null;
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();  // show our own button instead of the browser's mini bar
+  installPrompt = e;
+  $("#install").hidden = false;
+});
+
+function setupInstall() {
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(console.error);
+  $("#install").addEventListener("click", async () => {
+    if (!installPrompt) return;
+    installPrompt.prompt();
+    await installPrompt.userChoice;
+    installPrompt = null;
+    $("#install").hidden = true;
+  });
+  window.addEventListener("appinstalled", () => { $("#install").hidden = true; });
+}
+
+// ---------- top bar: chat list toggle and user menu ----------
+function closeUserMenu() {
+  $("#user-pop").hidden = true;
+  $("#user-btn").setAttribute("aria-expanded", "false");
+}
+
+function syncMenuButton() {
+  const open = wide() ? !document.body.classList.contains("side-hidden") : document.body.classList.contains("side-open");
+  $("#menu").setAttribute("aria-expanded", String(open));
+}
+
+function setupNav() {
+  // wide screens: ☰ hides/shows the chat list (remembered); phones: it slides in over the chat
+  try { document.body.classList.toggle("side-hidden", localStorage.getItem(SIDE_KEY) === "1"); } catch {}
+  $("#menu").addEventListener("click", () => {
+    if (wide()) {
+      const hidden = document.body.classList.toggle("side-hidden");
+      try { localStorage.setItem(SIDE_KEY, hidden ? "1" : "0"); } catch {}
+    } else {
+      document.body.classList.toggle("side-open");
+    }
+    syncMenuButton();
+  });
+  $("#backdrop").addEventListener("click", () => { document.body.classList.remove("side-open"); syncMenuButton(); });
+  matchMedia("(min-width: 761px)").addEventListener("change", () => { document.body.classList.remove("side-open"); syncMenuButton(); });
+  syncMenuButton();
+
+  $("#user-btn").addEventListener("click", (e) => {
+    e.stopPropagation();
+    const open = $("#user-pop").hidden;
+    $("#user-pop").hidden = !open;
+    $("#user-btn").setAttribute("aria-expanded", String(open));
+  });
+  document.addEventListener("click", (e) => { if (!e.target.closest(".user-menu")) closeUserMenu(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    closeUserMenu();
+    document.body.classList.remove("side-open");
+    syncMenuButton();
+  });
+
+  $("#chat-search").addEventListener("input", renderChats);
+  // phone: picking a chat closes the drawer (route() does that); wide: nothing to do
+}
+
+// ---------- wiring ----------
+window.addEventListener("DOMContentLoaded", async () => {
+  marked.setOptions({ gfm: true });
+  $("#ask-form").addEventListener("submit", (e) => { e.preventDefault(); send($("#question").value); });
+  $("#question").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send($("#question").value); }
+  });
+  $("#question").addEventListener("input", autosize);
+  $("#stop").addEventListener("click", () => {
+    if (state.runningChat !== null) api(`/api/chats/${state.runningChat}/stop`, { method: "POST", body: "{}" });
+  });
+  // "+ New" while already on #/new doesn't fire hashchange, so reset by hand
+  document.querySelectorAll("a.new-chat").forEach((a) => a.addEventListener("click", (e) => {
+    if (location.hash === "#/new") { e.preventDefault(); route(); }
+  }));
+  setupNav();
+  // stay at the newest message when the layout changes size (app window settling, rotation,
+  // keyboard), unless the reader has scrolled up
+  const box = $("#messages");
+  let atBottom = true;
+  box.addEventListener("scroll", () => { atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120; });
+  new ResizeObserver(() => { if (atBottom) box.scrollTop = box.scrollHeight; }).observe(box);
+  $("#model").addEventListener("change", savePrefs);
+  $("#effort").addEventListener("change", savePrefs);
+  window.addEventListener("hashchange", route);
+  await loadOptions().catch(console.error);
+  route();
+  setupInstall();
+});
