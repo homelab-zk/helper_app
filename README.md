@@ -50,7 +50,7 @@ your Claude subscription; there is no separate API key.
 
 ## Setup
 
-Run these as the user that should run the app (not root).
+Run these as the user that should run the app (not root, and without `sudo` unless shown).
 
 1. **Get the code**
 
@@ -88,8 +88,9 @@ Run these as the user that should run the app (not root).
 6. **Run it as a service**
 
    ```bash
+   mkdir -p ~/.config/systemd/user                       # not there yet on a fresh system
    cp helper-admin.service.example ~/.config/systemd/user/helper-admin.service
-   nano ~/.config/systemd/user/helper-admin.service     # WorkingDirectory = this folder
+   nano ~/.config/systemd/user/helper-admin.service     # only if not cloned to ~/helper-app
    systemctl --user daemon-reload
    systemctl --user enable --now helper-admin
    sudo loginctl enable-linger "$USER"                   # keep running without a login

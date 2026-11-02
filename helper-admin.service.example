@@ -1,6 +1,7 @@
 # systemd user unit for the helper app. Copy it, set the folder, then enable it:
+#   mkdir -p ~/.config/systemd/user
 #   cp helper-admin.service.example ~/.config/systemd/user/helper-admin.service
-#   nano ~/.config/systemd/user/helper-admin.service      # WorkingDirectory = where you cloned the repo
+#   nano ~/.config/systemd/user/helper-admin.service      # only if the repo isn't in ~/helper-app
 #   systemctl --user daemon-reload && systemctl --user enable --now helper-admin
 #   sudo loginctl enable-linger "$USER"                    # keep it running without a login
 [Unit]
