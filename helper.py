@@ -26,8 +26,9 @@ import time
 from contextlib import closing
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
+from convert import ConvertError, convert
 from common import (ICONS, USERS_TABLE, BaseHandler, admin_user, check_login, html_escape, init_sessions,
                     read_credential, sql as _sql, verify_password)
 
@@ -47,8 +48,14 @@ IMAGE_TYPES = {"image/png": (".png", (b"\x89PNG",)), "image/jpeg": (".jpg", (b"\
                "image/webp": (".webp", (b"RIFF",)), "image/gif": (".gif", (b"GIF87a", b"GIF89a"))}
 MAX_IMAGES = 4
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
-IMAGE_ONLY_QUESTION = ("Look at the attached screenshot(s): what do they show (read any error message exactly), "
-                       "and what do the documents say about it?")
+# attached files: converted to text here (PDF/DOCX with convert.py, the rest read as text) and sent with the question
+FILE_TYPES = {".pdf", ".docx", ".txt", ".md", ".markdown", ".log", ".csv", ".json", ".xml", ".yaml", ".yml",
+              ".ini", ".conf", ".cfg"}
+MAX_FILES = 3
+MAX_FILE_BYTES = 10 * 1024 * 1024
+MAX_ATTACHED_CHARS = 100_000  # all attached files of one question together (about 25K tokens)
+ATTACHMENT_ONLY_QUESTION = ("Look at the attachment(s): what do they show (read any error message exactly), "
+                            "and what do the documents say about it?")
 MAX_LISTED_FILES = 100  # more files: Claude gets the count and searches instead of a list
 HISTORY_FALLBACK_MESSAGES = 20
 
@@ -61,8 +68,9 @@ The working directory holds this helper's reference documents{files}
 
 Find what you need with Grep and Glob and Read only the relevant parts; don't read whole large files.
 
-The user may attach screenshots (for example of an error). Read them carefully, quote error codes and messages
-exactly, then search the documents for those codes, messages and the names of the screens or services shown.
+The user may attach screenshots (for example of an error) and files (logs, configs, documents; their text is
+included in the message, marked as attachments). Read them carefully, quote error codes and messages exactly,
+then search the documents for those codes, messages and the names of the screens, services or settings shown.
 
 How to answer:
 - Base answers on these documents and say where each part comes from (document title, section or heading).
@@ -137,6 +145,8 @@ def init_db():
         conn.execute(USERS_TABLE)
         if "images" not in [r[1] for r in conn.execute("PRAGMA table_info(messages)")]:
             conn.execute("ALTER TABLE messages ADD COLUMN images TEXT")  # added with screenshots: JSON list of file names
+        if "files" not in [r[1] for r in conn.execute("PRAGMA table_info(messages)")]:
+            conn.execute("ALTER TABLE messages ADD COLUMN files TEXT")  # attached files: JSON [{name, stored, size}]
         if "owner" not in [r[1] for r in conn.execute("PRAGMA table_info(chats)")]:
             # added with per-helper users: each user sees only their own chats; older chats are the admin's
             conn.execute("ALTER TABLE chats ADD COLUMN owner TEXT")
@@ -149,12 +159,12 @@ def get_chat(chat_id, owner):
     return rows[0] if rows else None
 
 
-def add_message(chat_id, role, content, tools=None, model=None, effort=None, web=False, images=None):
+def add_message(chat_id, role, content, tools=None, model=None, effort=None, web=False, images=None, files=None):
     now = time.time()
-    sql("INSERT INTO messages (chat_id, role, content, tools, model, effort, web, images, created) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    sql("INSERT INTO messages (chat_id, role, content, tools, model, effort, web, images, files, created) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (chat_id, role, content, json.dumps(tools) if tools else None, model, effort, "1" if web else None,
-         json.dumps(images) if images else None, now))
+         json.dumps(images) if images else None, json.dumps(files) if files else None, now))
     sql("UPDATE chats SET updated = ? WHERE id = ?", (now, chat_id))
 
 
@@ -195,11 +205,13 @@ def describe_tool(name, inp):
 
 def history_prompt(chat_id, question):
     """Prompt for a fresh session when the chat's Claude session can't be resumed."""
-    rows, _ = sql("SELECT role, content, images FROM messages WHERE chat_id = ? ORDER BY id", (chat_id,))
+    rows, _ = sql("SELECT role, content, images, files FROM messages WHERE chat_id = ? ORDER BY id", (chat_id,))
     earlier = rows[:-1][-HISTORY_FALLBACK_MESSAGES:]  # the last row is the new question
     lines = ["Earlier conversation in this chat, for context:", ""]
     for r in earlier:
         shots = f" [{len(json.loads(r['images']))} screenshot(s) attached then, not shown again]" if r["images"] else ""
+        if r["files"]:
+            shots += f" [attached then: {', '.join(f['name'] for f in json.loads(r['files']))}; not shown again]"
         lines.append(f"{'Question' if r['role'] == 'user' else 'Answer'}: {r['content']}{shots}\n")
     return "\n".join(lines + ["New question:", question])
 
@@ -225,6 +237,55 @@ def check_images(raw):
     return out
 
 
+def check_files(raw):
+    """[{name, ext, data, text, truncated}] from the request's files, converted to text; ValueError if not usable."""
+    if not isinstance(raw, list) or len(raw) > MAX_FILES:
+        raise ValueError(f"at most {MAX_FILES} files per question")
+    out, budget = [], MAX_ATTACHED_CHARS
+    for i, f in enumerate(raw, 1):
+        name = re.sub(r"[^\w .()&+,'-]", "_", Path(str((f or {}).get("name", ""))).name).strip(" .")[:100] or f"file-{i}"
+        ext = Path(name).suffix.lower()
+        if ext not in FILE_TYPES:
+            raise ValueError(f"{name}: file type not allowed ({', '.join(sorted(FILE_TYPES))})")
+        try:
+            data = base64.b64decode(str(f.get("data", "")), validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError(f"{name}: not a valid upload") from None
+        if len(data) > MAX_FILE_BYTES:
+            raise ValueError(f"{name}: larger than 10 MB")
+        if ext in (".pdf", ".docx"):
+            with tempfile.TemporaryDirectory(dir=HELPER_DIR, prefix=".convert-") as tmp:
+                path = Path(tmp) / f"upload{ext}"
+                path.write_bytes(data)
+                try:
+                    text, _ = convert(path)
+                except ConvertError as e:
+                    raise ValueError(f"{name}: {e}") from None
+        else:
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                text = data.decode("latin-1")  # logs from older tools; every byte is valid here
+            if "\x00" in text:
+                raise ValueError(f"{name}: not a text file")
+        truncated = len(text) > budget
+        text = text[:max(budget, 0)]
+        budget -= len(text)
+        out.append({"name": name, "ext": ext, "data": data, "text": text, "truncated": truncated})
+    return out
+
+
+def save_files(chat_id, files):
+    folder = UPLOADS_DIR / str(chat_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    saved = []
+    for f in files:
+        stored = f"{int(time.time() * 1000)}-{secrets.token_hex(4)}-{f['name']}"
+        (folder / stored).write_bytes(f["data"])
+        saved.append({"name": f["name"], "stored": stored, "size": len(f["data"]), "truncated": f["truncated"]})
+    return saved
+
+
 def save_images(chat_id, images):
     folder = UPLOADS_DIR / str(chat_id)
     folder.mkdir(parents=True, exist_ok=True)
@@ -236,10 +297,14 @@ def save_images(chat_id, images):
     return names
 
 
-def user_message(text, images):
-    """One stream-json input line: the screenshots, then the question."""
+def user_message(text, images, files=()):
+    """One stream-json input line: the screenshots, the attached files' text, then the question."""
     content = [{"type": "image", "source": {"type": "base64", "media_type": kind, "data": base64.b64encode(data).decode()}}
                for kind, data in images]
+    for f in files:
+        note = " (cut off: only the first part fits)" if f["truncated"] else ""
+        content.append({"type": "text", "text": f'Attached file "{f["name"]}"{note}:\n<attachment name="{f["name"]}">\n'
+                                                f'{f["text"]}\n</attachment>'})
     content.append({"type": "text", "text": text})
     return json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n"
 
@@ -343,15 +408,24 @@ class Handler(BaseHandler):
                 return self.send_json({"error": "not found"}, 404)
             kind = {v[0]: k for k, v in IMAGE_TYPES.items()}[f.suffix]
             self.send_body(f.read_bytes(), kind, extra=[("X-Content-Type-Options", "nosniff")])
+        elif m := re.fullmatch(r"/api/chats/(\d+)/files/([0-9]+-[0-9a-f]{8}-[^/]+)", path):
+            stored = unquote(m.group(2))
+            f = UPLOADS_DIR / m.group(1) / stored
+            if "/" in stored or not get_chat(int(m.group(1)), self.user) or not f.is_file():  # only the chat's owner
+                return self.send_json({"error": "not found"}, 404)
+            name = stored.split("-", 2)[2].replace('"', "")
+            self.send_body(f.read_bytes(), "application/octet-stream",
+                           extra=[("Content-Disposition", f'attachment; filename="{name}"'), ("X-Content-Type-Options", "nosniff")])
         elif m := re.fullmatch(r"/api/chats/(\d+)", path):
             chat = get_chat(int(m.group(1)), self.user)
             if not chat:
                 return self.send_json({"error": "chat not found"}, 404)
-            msgs, _ = sql("SELECT role, content, tools, model, effort, web, images, created FROM messages "
+            msgs, _ = sql("SELECT role, content, tools, model, effort, web, images, files, created FROM messages "
                           "WHERE chat_id = ? ORDER BY id", (chat["id"],))
             for msg in msgs:
                 msg["tools"] = json.loads(msg["tools"]) if msg["tools"] else []
                 msg["images"] = json.loads(msg["images"]) if msg["images"] else []
+                msg["files"] = json.loads(msg["files"]) if msg["files"] else []
             with LOCK:
                 chat["running"] = chat["id"] in RUNNING
             self.send_json({**chat, "messages": msgs})
@@ -367,7 +441,7 @@ class Handler(BaseHandler):
         if not self.authorized():
             return
         try:  # a question can carry screenshots (base64): allow up to 30 MB there
-            data = self.read_json(30_000_000 if path.endswith("/ask") else 100_000)
+            data = self.read_json(80_000_000 if path.endswith("/ask") else 100_000)
         except ValueError as e:
             return self.send_json({"error": str(e)}, 400)
         if path == "/api/chats":
@@ -380,14 +454,15 @@ class Handler(BaseHandler):
             question = str(data.get("question") or "").strip()
             try:
                 images = check_images(data.get("images") or [])
+                files = check_files(data.get("files") or [])
             except ValueError as e:
                 return self.send_json({"error": str(e)}, 400)
-            if not question and not images:
+            if not question and not images and not files:
                 return self.send_json({"error": "empty question"}, 400)
             model, effort = str(data.get("model") or ""), str(data.get("effort") or "")
             if (model and model not in MODELS) or (effort and effort not in EFFORTS):
                 return self.send_json({"error": "unknown model or effort"}, 400)
-            self.ask(int(m.group(1)), question, model, effort, bool(data.get("web")), images)
+            self.ask(int(m.group(1)), question, model, effort, bool(data.get("web")), images, files)
         elif m := re.fullmatch(r"/api/chats/(\d+)/stop", path):
             if not get_chat(int(m.group(1)), self.user):
                 return self.send_json({"error": "chat not found"}, 404)
@@ -422,7 +497,7 @@ class Handler(BaseHandler):
         except (BrokenPipeError, ConnectionResetError):
             self.client_gone = True  # keep going: the answer is still saved
 
-    def ask(self, chat_id, question, model, effort, web, images=()):
+    def ask(self, chat_id, question, model, effort, web, images=(), files=()):
         chat = get_chat(chat_id, self.user)
         if not chat:
             return self.send_json({"error": "chat not found"}, 404)
@@ -438,14 +513,19 @@ class Handler(BaseHandler):
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Accel-Buffering", "no")  # nginx: pass the stream through unbuffered
             self.end_headers()
-            add_message(chat_id, "user", question, images=save_images(chat_id, images) if images else None)
+            add_message(chat_id, "user", question, images=save_images(chat_id, images) if images else None,
+                        files=save_files(chat_id, files) if files else None)
             sql("UPDATE chats SET model = ?, effort = ? WHERE id = ?", (model, effort, chat_id))
-            text = question or IMAGE_ONLY_QUESTION
+            text = question or ATTACHMENT_ONLY_QUESTION
+            for f in files:
+                if f["truncated"]:
+                    self.emit("status", {"text": f"{f['name']}: too long, only the first part was sent "
+                                                 f"(at most {MAX_ATTACHED_CHARS:,} characters per question)."})
 
-            run = self.run_claude(chat_id, chat["session_id"], user_message(text, images), model, effort, web)
+            run = self.run_claude(chat_id, chat["session_id"], user_message(text, images, files), model, effort, web)
             if chat["session_id"] and not run["session_id"] and chat_id not in STOPPED:
                 self.emit("status", {"text": "Earlier Claude session not found; continuing from the saved chat."})
-                run = self.run_claude(chat_id, None, user_message(history_prompt(chat_id, text), images),
+                run = self.run_claude(chat_id, None, user_message(history_prompt(chat_id, text), images, files),
                                       model, effort, web)
 
             result = run["result"] or {}

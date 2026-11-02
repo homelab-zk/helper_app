@@ -16,6 +16,10 @@ your Claude subscription; there is no separate API key.
   upload (the original is kept for download). Drag and drop.
 - **Users per helper**: each helper has its own users (scrypt password hashes); everyone sees only their own
   chats. The admin account works everywhere. A new password or a removed user logs that person out at once.
+- **Attachments**: up to 3 files per question (`.pdf`, `.docx`, `.txt`, `.md`, `.log`, `.csv`, `.json`, `.xml`,
+  `.yaml`, `.ini`, `.conf`, `.cfg`; 10 MB each). They're converted to text on the server (PDF/DOCX locally, as
+  for documents) and sent with the question, at most 100,000 characters per question; kept with the chat
+  for download and removed with it.
 - **Screenshots**: attach up to 4 per question (📎, paste with Ctrl+V, or drag and drop); they're scaled
   down in the browser, sent to Claude as images, and kept with the chat (visible only to its owner).
   Deleting a chat removes its screenshots and Claude Code's own transcript of it.
@@ -37,7 +41,7 @@ your Claude subscription; there is no separate API key.
 
 ## Security and privacy
 
-- **What leaves your machine**: each question, its screenshots and the document excerpts Claude reads are sent to Anthropic,
+- **What leaves your machine**: each question, its screenshots, the text of attached files and the document excerpts Claude reads are sent to Anthropic,
   as with any Claude Code use. With Web search ticked, Claude also sends short search queries to a search
   service (it is told never to put document text in them). PDF/DOCX conversion is local.
 - **What Claude can do**: only `Read`, `Grep` and `Glob` in the helper's own `docs/` folder

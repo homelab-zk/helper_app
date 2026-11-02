@@ -55,11 +55,11 @@
     <form id="ask-form">
       <div id="attachments" class="attachments" hidden></div>
       <div class="ask-row">
-        <button type="button" id="attach" class="icon-btn attach" title="Add screenshots (or paste with Ctrl+V)" aria-label="Add screenshots">
+        <button type="button" id="attach" class="icon-btn attach" title="Add screenshots or files (or paste with Ctrl+V)" aria-label="Add screenshots or files">
           <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M21 11.5l-8.6 8.6a5 5 0 01-7.1-7.1l8.6-8.6a3.3 3.3 0 014.7 4.7l-8.6 8.6a1.7 1.7 0 01-2.4-2.4l7.9-7.9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
-        <input type="file" id="attach-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
-        <textarea id="question" rows="1" placeholder="Ask a question… (paste a screenshot with Ctrl+V)" aria-label="Question"></textarea>
+        <input type="file" id="attach-input" accept="image/png,image/jpeg,image/webp,image/gif,.pdf,.docx,.txt,.md,.markdown,.log,.csv,.json,.xml,.yaml,.yml,.ini,.conf,.cfg" multiple hidden>
+        <textarea id="question" rows="1" placeholder="Ask a question… (paste a screenshot with Ctrl+V, or 📎 for files)" aria-label="Question"></textarea>
         <button type="submit" id="send" class="button primary">Send</button>
         <button type="button" id="stop" class="button danger" hidden>Stop</button>
       </div>

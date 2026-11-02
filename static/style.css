@@ -376,3 +376,13 @@ table.users .uname { font-weight: 600; overflow-wrap: anywhere; }
 .msg.user .shots img { display: block; max-height: 160px; max-width: 100%; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); }
 .msg.user .bubble:has(.shots) { white-space: normal; }
 .msg.user .bubble > div:not(.shots) { white-space: pre-wrap; }
+.file-chip {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 260px; padding: 6px 10px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--panel); color: var(--text); text-decoration: none; font-size: 0.85rem;
+}
+a.file-chip:hover { border-color: var(--accent); }
+.file-chip .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-chip .file-size { color: var(--muted); white-space: nowrap; }
+.attachments .thumb .file-chip { height: 64px; }
+.msg.user .files { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; justify-content: flex-end; }
+.msg.user .bubble:has(.files) { white-space: normal; }

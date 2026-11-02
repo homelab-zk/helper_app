@@ -3,6 +3,13 @@ const $ = (sel) => document.querySelector(sel);
 const state = { chatId: null, runningChat: null, liveEl: null, defaultModel: "opus", name: "Helper", purpose: "", files: [],
   chats: [], pending: [] };  // one answer at a time; pending = screenshots waiting to be sent
 const MAX_IMAGES = 4;
+const MAX_FILES = 3;
+const MAX_FILE_MB = 10;
+const DOC_EXT = [".pdf", ".docx", ".txt", ".md", ".markdown", ".log", ".csv", ".json", ".xml", ".yaml", ".yml", ".ini", ".conf", ".cfg"];  // also checked on the server
+const fmtSize = (b) => b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(0)} KB` : `${(b / 1048576).toFixed(1)} MB`;
+const fileChip = (name, size, href) => `<${href ? `a href="${esc(href)}" download` : "span"} class="file-chip" title="${esc(name)}">` +
+  `<span class="file-icon" aria-hidden="true">📄</span><span class="file-name">${esc(name)}</span>` +
+  `${size != null ? `<span class="file-size">${fmtSize(size)}</span>` : ""}</${href ? "a" : "span"}>`;
 const MAX_SIDE = 1568;  // Claude reads images best up to about this size; larger ones are scaled down first
 
 const EFFORT_LABELS = { "": "Default", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" };
@@ -143,7 +150,8 @@ async function showChat(id) {
   document.title = `${chat.title} – ${state.name}`;
   applyChoice(chat.model, chat.effort);
   for (const m of chat.messages) {
-    if (m.role === "user") addUser(m.content, (m.images || []).map((n) => `/api/chats/${id}/images/${n}`));
+    if (m.role === "user") addUser(m.content, (m.images || []).map((n) => `/api/chats/${id}/images/${n}`),
+      (m.files || []).map((f) => ({ name: f.name, size: f.size, href: `/api/chats/${id}/files/${encodeURIComponent(f.stored)}` })));
     else box.append(answerEl(m.content, m.tools, 0, m.model, m.effort, m.web));
   }
   setRunning(state.runningChat);
@@ -161,13 +169,14 @@ async function showChat(id) {
 }
 
 // ---------- messages ----------
-// images: URLs (saved screenshots, or data: URLs of ones just sent)
-function addUser(text, images = []) {
+// images: URLs (saved screenshots, or data: URLs of ones just sent); files: [{name, size, href}]
+function addUser(text, images = [], files = []) {
   const el = document.createElement("div");
   el.className = "msg user";
   const shots = images.length ? `<div class="shots">${images.map((u) =>
     `<a href="${esc(u)}" target="_blank" rel="noopener"><img src="${esc(u)}" alt="Screenshot"></a>`).join("")}</div>` : "";
-  el.innerHTML = `<div class="bubble">${shots}${text ? `<div>${esc(text)}</div>` : ""}</div>`;
+  const docs = files.length ? `<div class="files">${files.map((f) => fileChip(f.name, f.size, f.href)).join("")}</div>` : "";
+  el.innerHTML = `<div class="bubble">${shots}${docs}${text ? `<div>${esc(text)}</div>` : ""}</div>`;
   $("#messages").append(el);
 }
 
@@ -198,11 +207,29 @@ async function prepareImage(file) {
   return { media_type: type, dataUrl };
 }
 
+const readDataUrl = (file) => new Promise((resolve, reject) => {
+  const fr = new FileReader();
+  fr.onload = () => resolve(fr.result);
+  fr.onerror = () => reject(new Error(`${file.name}: can't read this file`));
+  fr.readAsDataURL(file);
+});
+
+// screenshots and files from the 📎 button, Ctrl+V or drag and drop
 async function addImages(files) {
-  const images = [...files].filter((f) => f.type.startsWith("image/"));
-  for (const f of images) {
-    if (state.pending.length >= MAX_IMAGES) { alert(`At most ${MAX_IMAGES} screenshots per question.`); break; }
-    try { state.pending.push(await prepareImage(f)); } catch (e) { alert(e.message); }
+  for (const f of [...files]) {
+    const ext = (f.name.match(/\.[^.]+$/) || [""])[0].toLowerCase();
+    try {
+      if (["image/png", "image/jpeg", "image/webp", "image/gif"].includes(f.type)) {
+        if (state.pending.filter((p) => p.kind === "image").length >= MAX_IMAGES) throw new Error(`At most ${MAX_IMAGES} screenshots per question.`);
+        state.pending.push({ kind: "image", ...(await prepareImage(f)) });
+      } else if (DOC_EXT.includes(ext)) {
+        if (state.pending.filter((p) => p.kind === "file").length >= MAX_FILES) throw new Error(`At most ${MAX_FILES} files per question.`);
+        if (f.size > MAX_FILE_MB * 1048576) throw new Error(`${f.name}: larger than ${MAX_FILE_MB} MB.`);
+        state.pending.push({ kind: "file", name: f.name, size: f.size, dataUrl: await readDataUrl(f) });
+      } else {
+        throw new Error(`${f.name}: this file type can't be attached. Screenshots (PNG, JPEG, WebP, GIF) and ${DOC_EXT.join(" ")} can.`);
+      }
+    } catch (e) { alert(e.message); }
   }
   renderPending();
   $("#question").focus();
@@ -215,7 +242,8 @@ function renderPending() {
   state.pending.forEach((p, i) => {
     const d = document.createElement("div");
     d.className = "thumb";
-    d.innerHTML = `<img src="${p.dataUrl}" alt="Screenshot ${i + 1}"><button type="button" aria-label="Remove screenshot ${i + 1}" title="Remove">✕</button>`;
+    d.innerHTML = (p.kind === "image" ? `<img src="${p.dataUrl}" alt="Screenshot ${i + 1}">` : fileChip(p.name, p.size)) +
+      `<button type="button" aria-label="Remove attachment ${i + 1}" title="Remove">✕</button>`;
     d.querySelector("button").onclick = () => { state.pending.splice(i, 1); renderPending(); };
     box.append(d);
   });
@@ -228,7 +256,7 @@ function setupAttachments() {
   $("#attach-input").addEventListener("change", (e) => { addImages(e.target.files); e.target.value = ""; });
   // Ctrl+V with a screenshot on the clipboard (text pastes as usual)
   $("#question").addEventListener("paste", (e) => {
-    const files = [...(e.clipboardData?.items || [])].filter((it) => it.kind === "file" && it.type.startsWith("image/")).map((it) => it.getAsFile());
+    const files = [...(e.clipboardData?.items || [])].filter((it) => it.kind === "file").map((it) => it.getAsFile()).filter(Boolean);
     if (files.length) { e.preventDefault(); addImages(files); }
   });
   const form = $("#ask-form");
@@ -323,13 +351,14 @@ async function readEvents(res, handle) {
 
 async function send(question) {
   question = question.trim();
-  const images = state.pending;
-  if (state.runningChat !== null || (!question && !images.length)) return;
+  const images = state.pending.filter((p) => p.kind === "image");
+  const files = state.pending.filter((p) => p.kind === "file");
+  if (state.runningChat !== null || (!question && !state.pending.length)) return;
   let live;
   try {
     let id = state.chatId;
     if (id === null) {
-      const chat = await api("/api/chats", { method: "POST", body: JSON.stringify({ title: question || "Screenshot" }) });
+      const chat = await api("/api/chats", { method: "POST", body: JSON.stringify({ title: question || (files[0]?.name ?? "Screenshot") }) });
       id = state.chatId = chat.id;
       history.replaceState(null, "", `#/chat/${id}`);
       $("#chat-title").textContent = chat.title;
@@ -337,7 +366,7 @@ async function send(question) {
       loadChats();
     }
     setRunning(id);
-    addUser(question, images.map((p) => p.dataUrl));
+    addUser(question, images.map((p) => p.dataUrl), files.map((p) => ({ name: p.name, size: p.size })));
     state.pending = [];
     renderPending();
     $("#question").value = "";
@@ -348,7 +377,8 @@ async function send(question) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question, model: $("#model").value, effort: $("#effort").value, web: $("#web").checked,
-        images: images.map((p) => ({ media_type: p.media_type, data: p.dataUrl.split(",")[1] })) }),
+        images: images.map((p) => ({ media_type: p.media_type, data: p.dataUrl.split(",")[1] })),
+        files: files.map((p) => ({ name: p.name, data: p.dataUrl.split(",")[1] || "" })) }),
     });
     checkLogin(res);
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
