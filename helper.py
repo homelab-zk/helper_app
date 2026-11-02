@@ -244,6 +244,17 @@ def user_message(text, images):
     return json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n"
 
 
+def delete_transcript(session_id):
+    """Remove Claude Code's own copy of a chat (question, answers, screenshots) in ~/.claude/projects/.
+    Otherwise a deleted chat would stay there until Claude Code's cleanup (30 days by default)."""
+    if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", session_id or ""):
+        return
+    projects = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")) / "projects"
+    for path in projects.glob(f"*/{session_id}*"):
+        if path.name in (session_id, f"{session_id}.jsonl"):
+            shutil.rmtree(path, ignore_errors=True) if path.is_dir() else path.unlink(missing_ok=True)
+
+
 def stop_run(chat_id):
     with LOCK:
         proc = RUNNING.get(chat_id)
@@ -391,11 +402,13 @@ class Handler(BaseHandler):
         if not m:
             return self.send_json({"error": "not found"}, 404)
         chat_id = int(m.group(1))
-        if not get_chat(chat_id, self.user):
+        chat = get_chat(chat_id, self.user)
+        if not chat:
             return self.send_json({"error": "chat not found"}, 404)
         stop_run(chat_id)
         sql("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
         shutil.rmtree(UPLOADS_DIR / str(chat_id), ignore_errors=True)
+        delete_transcript(chat["session_id"])  # Claude Code's copy, screenshots included
         sql("DELETE FROM chats WHERE id = ?", (chat_id,))
         self.send_json({"deleted": chat_id})
 

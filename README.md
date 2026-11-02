@@ -18,6 +18,7 @@ your Claude subscription; there is no separate API key.
   chats. The admin account works everywhere. A new password or a removed user logs that person out at once.
 - **Screenshots**: attach up to 4 per question (📎, paste with Ctrl+V, or drag and drop); they're scaled
   down in the browser, sent to Claude as images, and kept with the chat (visible only to its owner).
+  Deleting a chat removes its screenshots and Claude Code's own transcript of it.
 - **Chat page**: streaming answers, the lookups Claude made, model (Opus / Sonnet / Haiku) and effort per
   question, an optional per-question **Web search** switch, chat search, installable as an app (PWA) over HTTPS.
 - **Supervision**: helpers are started automatically and restarted after a crash.
