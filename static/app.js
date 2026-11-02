@@ -1,7 +1,9 @@
 // Helper front-end: chat list in a sidebar and a streaming chat view.
 const $ = (sel) => document.querySelector(sel);
 const state = { chatId: null, runningChat: null, liveEl: null, defaultModel: "opus", name: "Helper", purpose: "", files: [],
-  chats: [] };  // one answer at a time
+  chats: [], pending: [] };  // one answer at a time; pending = screenshots waiting to be sent
+const MAX_IMAGES = 4;
+const MAX_SIDE = 1568;  // Claude reads images best up to about this size; larger ones are scaled down first
 
 const EFFORT_LABELS = { "": "Default", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" };
 const PREFS_KEY = "helper-prefs";  // last model/effort chosen, the default for new chats (each port is its own origin)
@@ -141,7 +143,7 @@ async function showChat(id) {
   document.title = `${chat.title} – ${state.name}`;
   applyChoice(chat.model, chat.effort);
   for (const m of chat.messages) {
-    if (m.role === "user") addUser(m.content);
+    if (m.role === "user") addUser(m.content, (m.images || []).map((n) => `/api/chats/${id}/images/${n}`));
     else box.append(answerEl(m.content, m.tools, 0, m.model, m.effort, m.web));
   }
   setRunning(state.runningChat);
@@ -159,11 +161,80 @@ async function showChat(id) {
 }
 
 // ---------- messages ----------
-function addUser(text) {
+// images: URLs (saved screenshots, or data: URLs of ones just sent)
+function addUser(text, images = []) {
   const el = document.createElement("div");
   el.className = "msg user";
-  el.innerHTML = `<div class="bubble">${esc(text)}</div>`;
+  const shots = images.length ? `<div class="shots">${images.map((u) =>
+    `<a href="${esc(u)}" target="_blank" rel="noopener"><img src="${esc(u)}" alt="Screenshot"></a>`).join("")}</div>` : "";
+  el.innerHTML = `<div class="bubble">${shots}${text ? `<div>${esc(text)}</div>` : ""}</div>`;
   $("#messages").append(el);
+}
+
+// ---------- screenshots: pick, paste or drop; scaled down in the browser before sending ----------
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error(`${file.name || "image"}: can't read this image`)); };
+    img.src = url;
+  });
+}
+
+async function prepareImage(file) {
+  const img = await loadImage(file);
+  const scale = Math.min(1, MAX_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
+  const keep = scale === 1 && file.size < 4 * 1024 * 1024 && ["image/png", "image/jpeg", "image/webp", "image/gif"].includes(file.type);
+  if (keep) return { media_type: file.type, dataUrl: await new Promise((r) => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(file); }) };
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(img.naturalWidth * scale);
+  canvas.height = Math.round(img.naturalHeight * scale);
+  canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+  // PNG keeps text in screenshots sharp; fall back to JPEG when that is still too big
+  let dataUrl = canvas.toDataURL("image/png");
+  let type = "image/png";
+  if (dataUrl.length > 6.5e6) { dataUrl = canvas.toDataURL("image/jpeg", 0.9); type = "image/jpeg"; }
+  return { media_type: type, dataUrl };
+}
+
+async function addImages(files) {
+  const images = [...files].filter((f) => f.type.startsWith("image/"));
+  for (const f of images) {
+    if (state.pending.length >= MAX_IMAGES) { alert(`At most ${MAX_IMAGES} screenshots per question.`); break; }
+    try { state.pending.push(await prepareImage(f)); } catch (e) { alert(e.message); }
+  }
+  renderPending();
+  $("#question").focus();
+}
+
+function renderPending() {
+  const box = $("#attachments");
+  box.innerHTML = "";
+  box.hidden = !state.pending.length;
+  state.pending.forEach((p, i) => {
+    const d = document.createElement("div");
+    d.className = "thumb";
+    d.innerHTML = `<img src="${p.dataUrl}" alt="Screenshot ${i + 1}"><button type="button" aria-label="Remove screenshot ${i + 1}" title="Remove">✕</button>`;
+    d.querySelector("button").onclick = () => { state.pending.splice(i, 1); renderPending(); };
+    box.append(d);
+  });
+}
+
+function setupAttachments() {
+  // touch screens have no Ctrl+V: keep the hint short there (📎 opens the photo picker)
+  if (matchMedia("(hover: none)").matches) $("#question").placeholder = "Ask a question…";
+  $("#attach").addEventListener("click", () => $("#attach-input").click());
+  $("#attach-input").addEventListener("change", (e) => { addImages(e.target.files); e.target.value = ""; });
+  // Ctrl+V with a screenshot on the clipboard (text pastes as usual)
+  $("#question").addEventListener("paste", (e) => {
+    const files = [...(e.clipboardData?.items || [])].filter((it) => it.kind === "file" && it.type.startsWith("image/")).map((it) => it.getAsFile());
+    if (files.length) { e.preventDefault(); addImages(files); }
+  });
+  const form = $("#ask-form");
+  form.addEventListener("dragover", (e) => { if ([...e.dataTransfer.types].includes("Files")) { e.preventDefault(); form.classList.add("drop-over"); } });
+  form.addEventListener("dragleave", (e) => { if (!form.contains(e.relatedTarget)) form.classList.remove("drop-over"); });
+  form.addEventListener("drop", (e) => { e.preventDefault(); form.classList.remove("drop-over"); addImages(e.dataTransfer.files); });
 }
 
 function answerEl(content, tools = [], seconds = 0, model = null, effort = null, web = false) {
@@ -252,12 +323,13 @@ async function readEvents(res, handle) {
 
 async function send(question) {
   question = question.trim();
-  if (state.runningChat !== null || !question) return;
+  const images = state.pending;
+  if (state.runningChat !== null || (!question && !images.length)) return;
   let live;
   try {
     let id = state.chatId;
     if (id === null) {
-      const chat = await api("/api/chats", { method: "POST", body: JSON.stringify({ title: question }) });
+      const chat = await api("/api/chats", { method: "POST", body: JSON.stringify({ title: question || "Screenshot" }) });
       id = state.chatId = chat.id;
       history.replaceState(null, "", `#/chat/${id}`);
       $("#chat-title").textContent = chat.title;
@@ -265,7 +337,9 @@ async function send(question) {
       loadChats();
     }
     setRunning(id);
-    addUser(question);
+    addUser(question, images.map((p) => p.dataUrl));
+    state.pending = [];
+    renderPending();
     $("#question").value = "";
     autosize();
     live = liveAnswer();
@@ -273,7 +347,8 @@ async function send(question) {
     const res = await fetch(`/api/chats/${id}/ask`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, model: $("#model").value, effort: $("#effort").value, web: $("#web").checked }),
+      body: JSON.stringify({ question, model: $("#model").value, effort: $("#effort").value, web: $("#web").checked,
+        images: images.map((p) => ({ media_type: p.media_type, data: p.dataUrl.split(",")[1] })) }),
     });
     checkLogin(res);
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
@@ -382,6 +457,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     if (location.hash === "#/new") { e.preventDefault(); route(); }
   }));
   setupNav();
+  setupAttachments();
   // stay at the newest message when the layout changes size (app window settling, rotation,
   // keyboard), unless the reader has scrolled up
   const box = $("#messages");

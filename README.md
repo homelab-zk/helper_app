@@ -16,6 +16,8 @@ your Claude subscription; there is no separate API key.
   upload (the original is kept for download). Drag and drop.
 - **Users per helper**: each helper has its own users (scrypt password hashes); everyone sees only their own
   chats. The admin account works everywhere. A new password or a removed user logs that person out at once.
+- **Screenshots**: attach up to 4 per question (📎, paste with Ctrl+V, or drag and drop); they're scaled
+  down in the browser, sent to Claude as images, and kept with the chat (visible only to its owner).
 - **Chat page**: streaming answers, the lookups Claude made, model (Opus / Sonnet / Haiku) and effort per
   question, an optional per-question **Web search** switch, chat search, installable as an app (PWA) over HTTPS.
 - **Supervision**: helpers are started automatically and restarted after a crash.
@@ -34,7 +36,7 @@ your Claude subscription; there is no separate API key.
 
 ## Security and privacy
 
-- **What leaves your machine**: each question and the document excerpts Claude reads are sent to Anthropic,
+- **What leaves your machine**: each question, its screenshots and the document excerpts Claude reads are sent to Anthropic,
   as with any Claude Code use. With Web search ticked, Claude also sends short search queries to a search
   service (it is told never to put document text in them). PDF/DOCX conversion is local.
 - **What Claude can do**: only `Read`, `Grep` and `Glob` in the helper's own `docs/` folder

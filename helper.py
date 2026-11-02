@@ -9,9 +9,13 @@ request, so only a port change needs a restart.
 Each question runs `claude -p` (headless) in docs/, read-only (Read/Grep/Glob only), and resumes the
 chat's Claude session for follow-ups. Standard library only.
 """
+import base64
+import binascii
 import json
 import os
 import re
+import secrets
+import shutil
 import signal
 import sqlite3
 import subprocess
@@ -31,12 +35,20 @@ HELPER_DIR = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
 CONFIG_FILE = HELPER_DIR / "helper.json"
 DOCS_DIR = HELPER_DIR / "docs"
 DB_PATH = HELPER_DIR / "chats.db"
+UPLOADS_DIR = HELPER_DIR / "uploads"  # screenshots attached to questions: uploads/<chat id>/<file>
 HOST = os.environ.get("CONV_HELPER_HOST", "0.0.0.0")
 CLAUDE_BIN = os.environ.get("CONV_HELPER_CLAUDE", str(Path.home() / ".local/bin/claude"))
 DEFAULT_MODEL = os.environ.get("CONV_HELPER_MODEL", "opus")
 MODELS = {"opus": "Opus", "sonnet": "Sonnet", "haiku": "Haiku"}  # aliases: always the latest version
 EFFORTS = ["low", "medium", "high", "xhigh", "max"]  # empty: Claude Code's default for the model
 TIMEOUT_S = 600
+# screenshots: types Claude reads, with their first bytes; limits per question
+IMAGE_TYPES = {"image/png": (".png", (b"\x89PNG",)), "image/jpeg": (".jpg", (b"\xff\xd8\xff",)),
+               "image/webp": (".webp", (b"RIFF",)), "image/gif": (".gif", (b"GIF87a", b"GIF89a"))}
+MAX_IMAGES = 4
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+IMAGE_ONLY_QUESTION = ("Look at the attached screenshot(s): what do they show (read any error message exactly), "
+                       "and what do the documents say about it?")
 MAX_LISTED_FILES = 100  # more files: Claude gets the count and searches instead of a list
 HISTORY_FALLBACK_MESSAGES = 20
 
@@ -48,6 +60,9 @@ What this helper is for (written by its owner; follow it):
 The working directory holds this helper's reference documents{files}
 
 Find what you need with Grep and Glob and Read only the relevant parts; don't read whole large files.
+
+The user may attach screenshots (for example of an error). Read them carefully, quote error codes and messages
+exactly, then search the documents for those codes, messages and the names of the screens or services shown.
 
 How to answer:
 - Base answers on these documents and say where each part comes from (document title, section or heading).
@@ -120,6 +135,8 @@ def init_db():
             CREATE INDEX IF NOT EXISTS messages_chat ON messages(chat_id);
         """)
         conn.execute(USERS_TABLE)
+        if "images" not in [r[1] for r in conn.execute("PRAGMA table_info(messages)")]:
+            conn.execute("ALTER TABLE messages ADD COLUMN images TEXT")  # added with screenshots: JSON list of file names
         if "owner" not in [r[1] for r in conn.execute("PRAGMA table_info(chats)")]:
             # added with per-helper users: each user sees only their own chats; older chats are the admin's
             conn.execute("ALTER TABLE chats ADD COLUMN owner TEXT")
@@ -132,10 +149,12 @@ def get_chat(chat_id, owner):
     return rows[0] if rows else None
 
 
-def add_message(chat_id, role, content, tools=None, model=None, effort=None, web=False):
+def add_message(chat_id, role, content, tools=None, model=None, effort=None, web=False, images=None):
     now = time.time()
-    sql("INSERT INTO messages (chat_id, role, content, tools, model, effort, web, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (chat_id, role, content, json.dumps(tools) if tools else None, model, effort, "1" if web else None, now))
+    sql("INSERT INTO messages (chat_id, role, content, tools, model, effort, web, images, created) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (chat_id, role, content, json.dumps(tools) if tools else None, model, effort, "1" if web else None,
+         json.dumps(images) if images else None, now))
     sql("UPDATE chats SET updated = ? WHERE id = ?", (now, chat_id))
 
 
@@ -145,7 +164,8 @@ def claude_cmd(session_id, model, effort, web, prompt_file):
     tools = "Read,Grep,Glob,WebSearch" if web else "Read,Grep,Glob"
     # the instructions go in a file: as an argument, a long purpose or file list hits Linux's 128 KB limit
     # per argument ("[Errno 7] Argument list too long")
-    cmd = [CLAUDE_BIN, "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+    cmd = [CLAUDE_BIN, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+           "--include-partial-messages",
            "--restricted", "--strict-mcp-config", "--disable-slash-commands", "--tools", tools,
            "--append-system-prompt-file", str(prompt_file)]
     if web:
@@ -175,11 +195,53 @@ def describe_tool(name, inp):
 
 def history_prompt(chat_id, question):
     """Prompt for a fresh session when the chat's Claude session can't be resumed."""
-    rows, _ = sql("SELECT role, content FROM messages WHERE chat_id = ? ORDER BY id", (chat_id,))
+    rows, _ = sql("SELECT role, content, images FROM messages WHERE chat_id = ? ORDER BY id", (chat_id,))
     earlier = rows[:-1][-HISTORY_FALLBACK_MESSAGES:]  # the last row is the new question
     lines = ["Earlier conversation in this chat, for context:", ""]
-    lines += [f"{'Question' if r['role'] == 'user' else 'Answer'}: {r['content']}\n" for r in earlier]
+    for r in earlier:
+        shots = f" [{len(json.loads(r['images']))} screenshot(s) attached then, not shown again]" if r["images"] else ""
+        lines.append(f"{'Question' if r['role'] == 'user' else 'Answer'}: {r['content']}{shots}\n")
     return "\n".join(lines + ["New question:", question])
+
+
+def check_images(raw):
+    """[(media type, bytes)] from the request's images, or raise ValueError with a readable message."""
+    if not isinstance(raw, list) or len(raw) > MAX_IMAGES:
+        raise ValueError(f"at most {MAX_IMAGES} screenshots per question")
+    out = []
+    for i, img in enumerate(raw, 1):
+        kind = str((img or {}).get("media_type", ""))
+        if kind not in IMAGE_TYPES:
+            raise ValueError(f"screenshot {i}: use PNG, JPEG, WebP or GIF")
+        try:
+            data = base64.b64decode(str(img.get("data", "")), validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError(f"screenshot {i}: not a valid image") from None
+        if len(data) > MAX_IMAGE_BYTES:
+            raise ValueError(f"screenshot {i}: larger than 5 MB")
+        if not data.startswith(IMAGE_TYPES[kind][1]) or (kind == "image/webp" and data[8:12] != b"WEBP"):
+            raise ValueError(f"screenshot {i}: the file isn't the image type it claims to be")
+        out.append((kind, data))
+    return out
+
+
+def save_images(chat_id, images):
+    folder = UPLOADS_DIR / str(chat_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    names = []
+    for kind, data in images:
+        name = f"{int(time.time() * 1000)}-{secrets.token_hex(4)}{IMAGE_TYPES[kind][0]}"
+        (folder / name).write_bytes(data)
+        names.append(name)
+    return names
+
+
+def user_message(text, images):
+    """One stream-json input line: the screenshots, then the question."""
+    content = [{"type": "image", "source": {"type": "base64", "media_type": kind, "data": base64.b64encode(data).decode()}}
+               for kind, data in images]
+    content.append({"type": "text", "text": text})
+    return json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n"
 
 
 def stop_run(chat_id):
@@ -264,14 +326,21 @@ class Handler(BaseHandler):
                 for r in rows:
                     r["running"] = r["id"] in RUNNING
             self.send_json(rows)
+        elif m := re.fullmatch(r"/api/chats/(\d+)/images/([0-9]+-[0-9a-f]{8}\.(?:png|jpg|webp|gif))", path):
+            f = UPLOADS_DIR / m.group(1) / m.group(2)
+            if not get_chat(int(m.group(1)), self.user) or not f.is_file():  # only the chat's owner
+                return self.send_json({"error": "not found"}, 404)
+            kind = {v[0]: k for k, v in IMAGE_TYPES.items()}[f.suffix]
+            self.send_body(f.read_bytes(), kind, extra=[("X-Content-Type-Options", "nosniff")])
         elif m := re.fullmatch(r"/api/chats/(\d+)", path):
             chat = get_chat(int(m.group(1)), self.user)
             if not chat:
                 return self.send_json({"error": "chat not found"}, 404)
-            msgs, _ = sql("SELECT role, content, tools, model, effort, web, created FROM messages WHERE chat_id = ? ORDER BY id",
-                          (chat["id"],))
+            msgs, _ = sql("SELECT role, content, tools, model, effort, web, images, created FROM messages "
+                          "WHERE chat_id = ? ORDER BY id", (chat["id"],))
             for msg in msgs:
                 msg["tools"] = json.loads(msg["tools"]) if msg["tools"] else []
+                msg["images"] = json.loads(msg["images"]) if msg["images"] else []
             with LOCK:
                 chat["running"] = chat["id"] in RUNNING
             self.send_json({**chat, "messages": msgs})
@@ -286,8 +355,8 @@ class Handler(BaseHandler):
             return self.logout()
         if not self.authorized():
             return
-        try:
-            data = self.read_json()
+        try:  # a question can carry screenshots (base64): allow up to 30 MB there
+            data = self.read_json(30_000_000 if path.endswith("/ask") else 100_000)
         except ValueError as e:
             return self.send_json({"error": str(e)}, 400)
         if path == "/api/chats":
@@ -298,12 +367,16 @@ class Handler(BaseHandler):
             self.send_json(get_chat(chat_id, self.user), 201)
         elif m := re.fullmatch(r"/api/chats/(\d+)/ask", path):
             question = str(data.get("question") or "").strip()
-            if not question:
+            try:
+                images = check_images(data.get("images") or [])
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+            if not question and not images:
                 return self.send_json({"error": "empty question"}, 400)
             model, effort = str(data.get("model") or ""), str(data.get("effort") or "")
             if (model and model not in MODELS) or (effort and effort not in EFFORTS):
                 return self.send_json({"error": "unknown model or effort"}, 400)
-            self.ask(int(m.group(1)), question, model, effort, bool(data.get("web")))
+            self.ask(int(m.group(1)), question, model, effort, bool(data.get("web")), images)
         elif m := re.fullmatch(r"/api/chats/(\d+)/stop", path):
             if not get_chat(int(m.group(1)), self.user):
                 return self.send_json({"error": "chat not found"}, 404)
@@ -322,6 +395,7 @@ class Handler(BaseHandler):
             return self.send_json({"error": "chat not found"}, 404)
         stop_run(chat_id)
         sql("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
+        shutil.rmtree(UPLOADS_DIR / str(chat_id), ignore_errors=True)
         sql("DELETE FROM chats WHERE id = ?", (chat_id,))
         self.send_json({"deleted": chat_id})
 
@@ -335,7 +409,7 @@ class Handler(BaseHandler):
         except (BrokenPipeError, ConnectionResetError):
             self.client_gone = True  # keep going: the answer is still saved
 
-    def ask(self, chat_id, question, model, effort, web):
+    def ask(self, chat_id, question, model, effort, web, images=()):
         chat = get_chat(chat_id, self.user)
         if not chat:
             return self.send_json({"error": "chat not found"}, 404)
@@ -351,13 +425,15 @@ class Handler(BaseHandler):
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Accel-Buffering", "no")  # nginx: pass the stream through unbuffered
             self.end_headers()
-            add_message(chat_id, "user", question)
+            add_message(chat_id, "user", question, images=save_images(chat_id, images) if images else None)
             sql("UPDATE chats SET model = ?, effort = ? WHERE id = ?", (model, effort, chat_id))
+            text = question or IMAGE_ONLY_QUESTION
 
-            run = self.run_claude(chat_id, chat["session_id"], question, model, effort, web)
+            run = self.run_claude(chat_id, chat["session_id"], user_message(text, images), model, effort, web)
             if chat["session_id"] and not run["session_id"] and chat_id not in STOPPED:
                 self.emit("status", {"text": "Earlier Claude session not found; continuing from the saved chat."})
-                run = self.run_claude(chat_id, None, history_prompt(chat_id, question), model, effort, web)
+                run = self.run_claude(chat_id, None, user_message(history_prompt(chat_id, text), images),
+                                      model, effort, web)
 
             result = run["result"] or {}
             answer = result.get("result") or run["last_text"]

@@ -359,3 +359,20 @@ table.users .uname { font-weight: 600; overflow-wrap: anywhere; }
 .tab.active .count { background: var(--user-bg); color: var(--accent); }
 .log-panel h2 { margin: 0 0 4px; font-size: 1.1rem; }
 .log-panel .log { max-height: 60vh; }
+
+/* ---------- screenshots ---------- */
+.ask-row .attach { height: 44px; width: 40px; color: var(--muted); }
+.ask-row .attach:hover { color: var(--accent); }
+.attachments { display: flex; flex-wrap: wrap; gap: 8px; }
+.attachments .thumb { position: relative; }
+.attachments .thumb img { display: block; height: 64px; max-width: 120px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); }
+.attachments .thumb button {
+  position: absolute; top: -7px; right: -7px; width: 22px; height: 22px; padding: 0; border-radius: 50%;
+  border: 1px solid var(--border); background: var(--panel); color: var(--text); font-size: 0.75rem; cursor: pointer; line-height: 1;
+}
+.attachments .thumb button:hover { color: var(--danger); border-color: var(--danger); }
+#ask-form.drop-over { outline: 2px dashed var(--accent); outline-offset: -4px; }
+.msg.user .shots { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; justify-content: flex-end; }
+.msg.user .shots img { display: block; max-height: 160px; max-width: 100%; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); }
+.msg.user .bubble:has(.shots) { white-space: normal; }
+.msg.user .bubble > div:not(.shots) { white-space: pre-wrap; }
