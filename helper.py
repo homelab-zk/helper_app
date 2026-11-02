@@ -36,6 +36,7 @@ HELPER_DIR = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
 CONFIG_FILE = HELPER_DIR / "helper.json"
 DOCS_DIR = HELPER_DIR / "docs"
 DB_PATH = HELPER_DIR / "chats.db"
+USAGE_FILE = HELPER_DIR.parent.parent / "usage.json"  # data/usage.json: the account's limits, shared by all helpers
 UPLOADS_DIR = HELPER_DIR / "uploads"  # screenshots attached to questions: uploads/<chat id>/<file>
 HOST = os.environ.get("CONV_HELPER_HOST", "0.0.0.0")
 CLAUDE_BIN = os.environ.get("CONV_HELPER_CLAUDE", str(Path.home() / ".local/bin/claude"))
@@ -320,6 +321,29 @@ def delete_transcript(session_id):
             shutil.rmtree(path, ignore_errors=True) if path.is_dir() else path.unlink(missing_ok=True)
 
 
+def save_usage(info):
+    """Keep the latest Claude plan usage Claude Code reported (its rate_limit_event, as in /usage)."""
+    windows = info.get("unifiedWindows") or {}
+    usage = {"updated": time.time(), "status": info.get("status"),
+             "windows": {k: {"utilization": w.get("utilization"), "resets_at": w.get("resetsAt"), "status": w.get("status")}
+                         for k, w in windows.items() if isinstance(w, dict)}}
+    tmp = USAGE_FILE.with_name(f".usage-{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(usage))
+    os.replace(tmp, USAGE_FILE)
+    return usage
+
+
+def load_usage():
+    try:
+        usage = json.loads(USAGE_FILE.read_text())
+    except (FileNotFoundError, ValueError):
+        return None
+    for w in usage.get("windows", {}).values():  # a window that has reset since: nothing used yet
+        if w.get("resets_at") and w["resets_at"] < time.time():
+            w.update(utilization=0, status="allowed", reset=True)
+    return usage
+
+
 def stop_run(chat_id):
     with LOCK:
         proc = RUNNING.get(chat_id)
@@ -390,6 +414,8 @@ class Handler(BaseHandler):
         path = url.path
         if path in self.STATIC:
             self.send_file(*self.STATIC[path], replace=[(b"{{TITLE}}", html_escape(cfg["name"]).encode())])
+        elif path == "/api/usage":
+            self.send_json(load_usage() or {})
         elif path == "/api/options":
             self.send_json({"name": cfg["name"], "purpose": cfg["purpose"], "files": doc_files(), "user": self.user,
                             "models": [{"id": k, "label": v} for k, v in MODELS.items()],
@@ -603,6 +629,11 @@ class Handler(BaseHandler):
                         i = tool_index.get(block.get("tool_use_id"))
                         if i is not None and not run["tools"][i].endswith("(blocked)"):
                             run["tools"][i] += " (blocked)"
+            elif kind == "rate_limit_event":
+                try:
+                    self.emit("usage", save_usage(ev.get("rate_limit_info") or {}))
+                except OSError:
+                    pass  # usage display only; never break an answer over it
             elif kind == "result":
                 run["result"] = ev
         proc.wait()

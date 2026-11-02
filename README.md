@@ -25,6 +25,8 @@ your Claude subscription; there is no separate API key.
   Deleting a chat removes its screenshots and Claude Code's own transcript of it.
 - **Chat page**: streaming answers, the lookups Claude made, model (Opus / Sonnet / Haiku) and effort per
   question, an optional per-question **Web search** switch, chat search, installable as an app (PWA) over HTTPS.
+- **Usage bar**: under the question box, how much of your Claude plan's 5-hour window is used (with reset time
+  and the weekly figure), as Claude Code reports it after each answer; shared by all helpers (`data/usage.json`).
 - **Supervision**: helpers are started automatically and restarted after a crash.
 - **Small**: Python standard library only for the app; two vendored browser libraries (marked, DOMPurify).
   Nothing of Claude runs while nobody is asking a question.

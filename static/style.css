@@ -386,3 +386,15 @@ a.file-chip:hover { border-color: var(--accent); }
 .attachments .thumb .file-chip { height: 64px; }
 .msg.user .files { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; justify-content: flex-end; }
 .msg.user .bubble:has(.files) { white-space: normal; }
+
+/* ---------- Claude usage bar (under the question options, full width of the chat area) ---------- */
+.usage { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 2px 10px; font-size: 0.78rem; color: var(--muted); }
+.usage-label { display: flex; gap: 6px; white-space: nowrap; }
+.usage-label strong { color: var(--text); }
+.usage-bar { height: 8px; border-radius: 999px; background: var(--code-bg); overflow: hidden; }
+.usage-bar span { display: block; height: 100%; width: 0; border-radius: 999px; background: #2e9d4f; transition: width 0.4s ease; }
+.usage[data-level="mid"] .usage-bar span { background: #d99a1e; }
+.usage[data-level="high"] .usage-bar span { background: var(--danger); }
+.usage[data-level="high"] .usage-label strong { color: var(--danger); }
+.usage-meta { grid-column: 1 / -1; }
+@media (max-width: 760px) { .usage-meta { font-size: 0.72rem; } }

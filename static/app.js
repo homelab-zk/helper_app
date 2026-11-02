@@ -309,6 +309,7 @@ function liveAnswer() {
     },
     tool({ text: t }) { note("", t); },
     status({ text: t }) { note("note", t); },
+    usage(u) { showUsage(u); },
     done({ answer, tools, seconds, model, effort, web }) {
       this.finished = true;
       cancelAnimationFrame(frame);
@@ -426,6 +427,38 @@ function setupInstall() {
   window.addEventListener("appinstalled", () => { $("#install").hidden = true; });
 }
 
+// ---------- Claude plan usage (5-hour and weekly windows), as Claude Code reports it after each answer ----------
+const fmtTime = (ts) => {
+  const d = new Date(ts * 1000);
+  const sameDay = d.toDateString() === new Date().toDateString();
+  return d.toLocaleString(undefined, sameDay ? { timeStyle: "short" } : { weekday: "short", hour: "2-digit", minute: "2-digit" });
+};
+
+function showUsage(u) {
+  const five = u?.windows?.five_hour;
+  if (!five || five.utilization == null) return;
+  const pct = Math.min(100, Math.round(five.utilization * 100));
+  const limited = five.status && five.status !== "allowed";
+  const level = limited || pct >= 85 ? "high" : pct >= 60 ? "mid" : "low";
+  const box = $("#usage");
+  box.hidden = false;
+  box.dataset.level = level;
+  $("#usage-pct").textContent = limited ? "limit reached" : `${pct}%`;
+  $("#usage-fill").style.width = `${limited ? 100 : pct}%`;
+  $(".usage-bar").setAttribute("aria-valuenow", String(pct));
+  const week = u.windows.seven_day;
+  const parts = [];
+  if (five.reset) parts.push("window has reset");
+  else if (five.resets_at) parts.push(`resets ${fmtTime(five.resets_at)}`);
+  if (week && week.utilization != null) parts.push(`week ${Math.round(week.utilization * 100)}%${week.resets_at && !week.reset ? ` (resets ${fmtTime(week.resets_at)})` : ""}`);
+  if (u.updated) parts.push(`as of ${fmtTime(u.updated)}`);
+  $("#usage-meta").textContent = parts.join(" · ");
+}
+
+async function loadUsage() {
+  try { showUsage(await api("/api/usage")); } catch {}
+}
+
 // ---------- top bar: chat list toggle and user menu ----------
 function closeUserMenu() {
   $("#user-pop").hidden = true;
@@ -498,6 +531,8 @@ window.addEventListener("DOMContentLoaded", async () => {
   $("#effort").addEventListener("change", savePrefs);
   window.addEventListener("hashchange", route);
   await loadOptions().catch(console.error);
+  loadUsage();
+  setInterval(loadUsage, 60_000);  // other helpers' questions and window resets
   route();
   setupInstall();
 });
