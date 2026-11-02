@@ -16,6 +16,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from contextlib import closing
@@ -36,6 +37,7 @@ DEFAULT_MODEL = os.environ.get("CONV_HELPER_MODEL", "opus")
 MODELS = {"opus": "Opus", "sonnet": "Sonnet", "haiku": "Haiku"}  # aliases: always the latest version
 EFFORTS = ["low", "medium", "high", "xhigh", "max"]  # empty: Claude Code's default for the model
 TIMEOUT_S = 600
+MAX_LISTED_FILES = 100  # more files: Claude gets the count and searches instead of a list
 HISTORY_FALLBACK_MESSAGES = 20
 
 PROMPT = """You are "{name}", a helper for one person, reached through a small chat web app.
@@ -95,8 +97,13 @@ def doc_files():
 def system_prompt(web):
     cfg = config()
     files = doc_files()
-    listing = (":\n" + "\n".join(f"- `{f}`" for f in files)) if files else \
-        ", but there are none yet: say so, and answer from general knowledge, clearly labelled."
+    if not files:
+        listing = ", but there are none yet: say so, and answer from general knowledge, clearly labelled."
+    elif len(files) <= MAX_LISTED_FILES:
+        listing = ":\n" + "\n".join(f"- `{f}`" for f in files)
+    else:  # a full list would be sent with every question (tokens) and can pass 128 KB
+        listing = (f": {len(files)} files, too many to list here. Search their contents with Grep first (keywords, "
+                   f"names, numbers); use Glob (for example `*loan*`) to find files by name.")
     return PROMPT.format(name=cfg["name"], purpose=cfg["purpose"].strip(), files=listing) + (WEB_NOTE if web else "")
 
 
@@ -133,12 +140,14 @@ def add_message(chat_id, role, content, tools=None, model=None, effort=None, web
 
 
 # ---------- claude CLI ----------
-def claude_cmd(session_id, model, effort, web):
+def claude_cmd(session_id, model, effort, web, prompt_file):
     # web search only, never WebFetch: Claude sees search results but can't open (or send data to) any URL
     tools = "Read,Grep,Glob,WebSearch" if web else "Read,Grep,Glob"
+    # the instructions go in a file: as an argument, a long purpose or file list hits Linux's 128 KB limit
+    # per argument ("[Errno 7] Argument list too long")
     cmd = [CLAUDE_BIN, "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
            "--restricted", "--strict-mcp-config", "--disable-slash-commands", "--tools", tools,
-           "--append-system-prompt", system_prompt(web)]
+           "--append-system-prompt-file", str(prompt_file)]
     if web:
         cmd += ["--allowedTools", "WebSearch"]  # headless: no one to approve it
     cmd += ["--model", model or DEFAULT_MODEL]
@@ -365,8 +374,17 @@ class Handler(BaseHandler):
                 RUNNING.pop(chat_id, None)
 
     def run_claude(self, chat_id, session_id, prompt, model, effort, web):
+        # this question's instructions, outside docs/ (Claude can't read the file with its tools); removed afterwards
+        with tempfile.NamedTemporaryFile("w", dir=HELPER_DIR, prefix=".prompt-", suffix=".md", delete=False) as f:
+            f.write(system_prompt(web))
         try:
-            proc = subprocess.Popen(claude_cmd(session_id, model, effort, web), cwd=DOCS_DIR, stdin=subprocess.PIPE,
+            return self._run_claude(chat_id, session_id, prompt, model, effort, web, f.name)
+        finally:
+            os.unlink(f.name)
+
+    def _run_claude(self, chat_id, session_id, prompt, model, effort, web, prompt_file):
+        try:
+            proc = subprocess.Popen(claude_cmd(session_id, model, effort, web, prompt_file), cwd=DOCS_DIR, stdin=subprocess.PIPE,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                     start_new_session=True)
         except OSError as e:
