@@ -388,7 +388,7 @@ a.file-chip:hover { border-color: var(--accent); }
 .msg.user .bubble:has(.files) { white-space: normal; }
 
 /* ---------- Claude usage bar (under the question options, full width of the chat area) ---------- */
-.usage { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 2px 10px; font-size: 0.78rem; color: var(--muted); }
+.usage { display: grid; grid-template-columns: auto minmax(60px, 1fr) auto; align-items: center; gap: 2px 10px; font-size: 0.78rem; color: var(--muted); }
 .usage-label { display: flex; gap: 6px; white-space: nowrap; }
 .usage-label strong { color: var(--text); }
 .usage-bar { height: 8px; border-radius: 999px; background: var(--code-bg); overflow: hidden; }
@@ -396,5 +396,8 @@ a.file-chip:hover { border-color: var(--accent); }
 .usage[data-level="mid"] .usage-bar span { background: #d99a1e; }
 .usage[data-level="high"] .usage-bar span { background: var(--danger); }
 .usage[data-level="high"] .usage-label strong { color: var(--danger); }
-.usage-meta { grid-column: 1 / -1; }
-@media (max-width: 760px) { .usage-meta { font-size: 0.72rem; } }
+.usage-meta { white-space: nowrap; }  /* one line: label · bar · info */
+@media (max-width: 760px) {  /* phones: no room beside the bar, so the info goes on a second line */
+  .usage { grid-template-columns: auto 1fr; }
+  .usage-meta { grid-column: 1 / -1; white-space: normal; font-size: 0.72rem; }
+}
